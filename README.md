@@ -82,21 +82,112 @@ Event ingestion is via the `@larksuiteoapi/node-sdk` WebSocket long-connection
 go through `lark-cli` (`im +messages-send/reply`, `api PATCH` for cards,
 `api POST` for comment replies).
 
+## Getting started (step-by-step)
+
+> **First time?** Follow these steps in order. Run **`run` in the foreground** first to scan the QR code — do **not** jump straight to `start`.
+
+### Step 0 — Node.js
+
+Node.js **≥ 20** required:
+
+```bash
+node -v
+```
+
+### Step 1 — Install opencode
+
+The bridge spawns `opencode serve` locally. Install only — no separate login — but the `opencode` binary must be on `$PATH`.
+
+```bash
+# macOS / Linux (recommended)
+curl -fsSL https://opencode.ai/install | bash
+
+# or Homebrew
+brew install anomalyco/tap/opencode
+
+# or npm
+npm install -g opencode-ai@latest
+```
+
+Verify in a **new terminal**:
+
+```bash
+opencode --version
+```
+
+Configure models/API keys per [opencode docs](https://opencode.ai/docs). Without a model, `/help` works but AI prompts may fail — use `/models` in chat to list providers.
+
+### Step 2 — Install Feishu CLI (lark-cli)
+
+Outgoing Lark actions use the official **`@larksuite/cli`** package (the unrelated npm package named `lark-cli` is **not** this tool):
+
+```bash
+npm install -g @larksuite/cli@latest
+lark-cli --version
+```
+
+The bridge can auto-install lark-cli on first `run`, but manual install avoids PATH surprises.
+
+### Step 3 — Install lark-opencode-bridge
+
+```bash
+npm install -g lark-opencode-bridge@latest
+lark-opencode-bridge doctor
+```
+
+Both `lark-cli` and `opencode` should show **ok**.
+
+### Step 4 — First foreground run + QR setup
+
+```bash
+lark-opencode-bridge run
+```
+
+Scan with the Feishu app → create/select an app → credentials land in `~/.lark-cli/config.json` and `~/.lark-opencode-bridge/secrets.json`. Wait for **`bridge ready — listening for IM messages`** before testing.
+
+### Step 5 — Feishu developer console (required)
+
+In https://open.feishu.cn/app/<app_id>:
+
+1. Enable **Bot** capability
+2. **Permissions** — import JSON from `lark-opencode-bridge scopes --copy`
+3. **Events** — use **persistent connection** (not webhook); subscribe to `im.message.receive_v1`
+4. **Publish a version** (most commonly missed step)
+
+Optional: `lark-opencode-bridge configure` to auto-set events and card callbacks.
+
+### Step 6 — Verify in Feishu
+
+1. Open a **P2P** chat with your bot
+2. Send `/help` — should reply immediately
+3. In normal groups, **`@mention` the bot**; or use `/spawn <topic>` for a dedicated workspace group
+
+### Step 7 — Background daemon (optional)
+
+Only after Step 6 works (macOS / Linux):
+
+```bash
+lark-opencode-bridge start
+lark-opencode-bridge status
+```
+
+Requires **global** install (`npm i -g`), not `npx`.
+
+See also [README.zh.md](./README.zh.md) for the Chinese walkthrough.
+
 ## Prerequisites
 
 - Node.js ≥ 20
-- [`opencode`](https://opencode.ai) on `$PATH` (install only — no separate login step)
-- A Feishu/Lark app (the **first `run` auto-launches a QR setup wizard** if none is configured)
+- [`opencode`](https://opencode.ai) on `$PATH`
+- Feishu CLI: [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli)
+- A Feishu/Lark app (created via QR wizard on first `run`)
 
-### Quick start
+### Quick start (already set up)
 
 ```bash
-npm i -g lark-opencode-bridge   # after publish; or `npm link` from a dev checkout
-lark-opencode-bridge run        # or just: lark-opencode-bridge
+npm i -g lark-opencode-bridge@latest
+lark-opencode-bridge run
 ```
-
-On first run: terminal QR → scan with Feishu → create/select app → credentials land in
-`~/.lark-cli/config.json` + `~/.lark-opencode-bridge/secrets.json`. See [README.zh.md](./README.zh.md).
 
 ### Manual / advanced setup
 
