@@ -24,8 +24,9 @@
 ## 安装
 
 ```bash
-# 全局安装（发布后）
+# 发布后
 npm i -g lark-opencode-bridge
+lark-opencode-bridge run
 
 # 或从源码开发
 git clone <this-repo> && cd lark-opencode-bridge

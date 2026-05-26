@@ -12,8 +12,8 @@
   },
   "homepage": "https://github.com/rorschachachxd/lark-opencode-bridge#readme",
   "bin": {
-    "lark-opencode-bridge": "./bin/lark-opencode-bridge.mjs",
-    "opencode-bridge": "./bin/lark-opencode-bridge.mjs"
+    "lark-opencode-bridge": "bin/lark-opencode-bridge.mjs",
+    "opencode-bridge": "bin/lark-opencode-bridge.mjs"
   },
   "exports": {
     ".": {
@@ -65,5 +65,9 @@
     "bridge",
     "ai-agent"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
