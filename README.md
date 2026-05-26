@@ -274,6 +274,12 @@ Bridge-specific (no opencode TUI counterpart):
 | `/workspaces save <name> [path]` | `/ws save …` | Save the chat's current cwd (or an explicit path) as a workspace |
 | `/workspaces use <name>` | `/ws use …` | Switch this chat to a saved workspace (resets the session) |
 | `/workspaces rm <name>` | `/ws rm …` | Delete a workspace |
+| `/reconnect` | — | Manually reconnect the Feishu WebSocket (when messages stop arriving) |
+| `/timeout [minutes]` | — | View or set per-chat idle timeout (auto-abort when opencode is silent); `0` disables |
+| `/doctor [note]` | — | Ask opencode to diagnose recent bridge warn/error logs (optional user description) |
+| `/config` | — | Open the interactive preferences card (reply style, allowlists, group @ policy, etc.) |
+
+Commands marked 🔒 in [README.zh.md](./README.zh.md#飞书内斜杠命令) (`/config`, `/reconnect`, `/doctor`, `/cd`, `/workspaces`, `/spawn`) require admin when `adminOpenIds` is set in config.
 
 ## Config
 

@@ -203,7 +203,103 @@ lark-opencode-bridge service install|start|stop|uninstall  （与 start/stop 等
 
 ### 飞书内斜杠命令
 
-见 [English README — In-chat commands](./README.md#in-chat-commands)。常用：`/help` `/new` `/status` `/stop` `/spawn` `/workspaces` **`/config`** `/doctor` `/reconnect` `/timeout`。
+在飞书聊天里**单独发一行**以 `/` 开头的命令即可（也支持多行消息里**最后一行**是命令）。  
+斜杠命令由 bridge **本地即时处理**，不经过 opencode，一般秒回。
+
+**怎么发消息**
+
+| 场景 | 用法 |
+|---|---|
+| 私聊机器人 | 直接发文字；发 `/help` 看全部命令 |
+| 普通群 | 必须 **`@机器人`** 再发（或 @ 后带命令） |
+| `/spawn` 建的工作群 | **不用 @**，直接发即可 |
+| 带图片 / 文件 / 富文本 | 正常发，bridge 会下载附件交给 opencode |
+| 云文档评论 | 在评论里 **@机器人** 提问，会自动回帖 |
+
+**别名说明**：命令名不区分大小写。下列写法等价：
+
+- `/clear` → `/new`
+- `/summarize` → `/compact`
+- `/resume`、`/continue` → `/sessions`
+- `/model` → `/models`，`/agent` → `/agents`，`/ws` → `/workspaces`
+- `/group`、`/拉群` → `/spawn`
+
+**管理员命令**：若在 `/config` 里设置了「管理员 open_id 列表」，则下表标注 🔒 的命令仅管理员可用；列表为空时所有人可用。
+
+---
+
+#### 会话与任务
+
+| 命令 | 别名 | 说明 |
+|---|---|---|
+| `/help` | — | 显示完整帮助（与本文一致） |
+| `/new` | `/clear` | 重置**本聊天**的 opencode 会话，清空上下文 |
+| `/init` | — | 让 opencode 分析当前工作目录，生成或更新根目录 `AGENTS.md` |
+| `/sessions` | `/resume`、`/continue` | 列出 opencode 里已有的会话（调试用） |
+| `/compact` | `/summarize` | 压缩当前会话历史，保留要点、释放上下文 |
+| `/share` | — | 为当前会话生成公开分享链接 |
+| `/unshare` | — | 取消当前会话的分享 |
+| `/undo` | — | 撤销上一条用户消息及其产生的文件改动 |
+| `/redo` | — | 恢复被 `/undo` 掉的内容 |
+| `/stop` | — | **中断**当前正在跑的任务（相当于 ESC） |
+
+#### 模型与 Agent
+
+| 命令 | 别名 | 说明 |
+|---|---|---|
+| `/models` | `/model` | 列出 opencode 可用的 provider 与模型 |
+| `/models <provider/model>` | `/model …` | 切换**本聊天**使用的模型；只写模型名时会尝试自动补全 provider |
+| `/agents` | `/agent` | 列出可用 agent（如 `build`、`plan`） |
+| `/agents <name>` | `/agent …` | 切换**本聊天**使用的 agent |
+
+#### 目录、状态与工作群
+
+| 命令 | 别名 | 说明 |
+|---|---|---|
+| `/cd <绝对路径>` | — | 设置**本聊天**的工作目录（会重建会话） 🔒 |
+| `/status` | — | 查看 session id、cwd、agent、模型、WebSocket 状态、空闲超时等 |
+| `/spawn <主题>` | `/group`、`/拉群` | **仅 P2P 私聊可用**。创建名为 `[opencode] <主题>` 的群，拉你进群并绑定新 session；**群内无需 @** 🔒 |
+| `/workspaces list` | `/ws list` | 列出已保存的命名工作目录 🔒 |
+| `/workspaces save <名> [路径]` | `/ws save …` | 保存工作目录（默认当前 cwd） 🔒 |
+| `/workspaces use <名>` | `/ws use …` | 切换到已保存的工作目录（会重建会话） 🔒 |
+| `/workspaces rm <名>` | `/ws rm …` | 删除已保存的工作目录 🔒 |
+
+#### 运维与设置
+
+| 命令 | 别名 | 说明 |
+|---|---|---|
+| `/reconnect` | — | 手动重连飞书 WebSocket（消息收不到时可试） 🔒 |
+| `/timeout [分钟]` | — | 不带参数：查看本聊天与全局空闲超时；`/timeout 30` 设 30 分钟无输出则中断；`/timeout 0` 关闭 |
+| `/doctor [描述]` | — | 把最近 bridge 日志交给 opencode 做**自诊断**（可附带问题描述） 🔒 |
+| `/config` | — | 打开**偏好设置卡片**：回复方式（reply/card）、访问白名单、群 @ 策略、文档评论开关等 🔒 |
+
+`/config` 卡片里可改的主要项：
+
+- **reply / card**：普通 markdown 回复 vs 流式交互卡片
+- **空闲超时、消息批处理间隔**
+- **是否处理云文档评论**、**群聊是否必须 @**
+- **允许发言的用户 / 群 ID**、**管理员 ID**
+
+提交后立即写入 `~/.lark-opencode-bridge/config.json`，**无需重启** bridge。
+
+---
+
+**示例**
+
+```text
+/help
+/status
+/models anthropic/claude-sonnet-4
+/agents build
+/cd /Users/me/my-project
+/spawn 重构登录模块
+/workspaces save main /Users/me/my-project
+/workspaces use main
+/timeout 45
+/doctor 私聊有回复但群里 @ 没反应
+```
+
+**不是斜杠命令**：除上表外，所有普通文字（以及图片、文件）都会作为 **opencode 对话** 处理；多个会话之间通过「每个 chat_id 独立 session」隔离。
 
 ## 数据目录
 
