@@ -1,122 +1,156 @@
 # lark-opencode-bridge
 
 [![CI](https://github.com/rorschachachxd/lark-opencode-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/rorschachachxd/lark-opencode-bridge/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/lark-opencode-bridge.svg)](https://www.npmjs.com/package/lark-opencode-bridge)
 
-A lightweight bridge that connects **Feishu/Lark** messaging with the
-**opencode** AI coding agent — install, scan QR, chat from your phone while
-opencode runs locally. Streaming cards, attachments, doc-comment @mentions,
-and `/spawn` workspace groups included.
+> 🌉 **TL;DR:** Drive the [opencode](https://opencode.ai) AI coding agent already running on your laptop from inside Feishu / Lark — over your phone, with collaborators, persistent group sessions, and native doc-comment + attachment integration.
+>
+> No model in the cloud, no code uploaded, no new account to sign up for — your code and execution stay 100% local.
 
 ```bash
 npm i -g lark-opencode-bridge@latest
 lark-opencode-bridge run
 ```
 
-Driven by the official [`larksuite/cli`](https://github.com/larksuite/cli)
-on the messaging side and [`opencode`](https://opencode.ai) on the AI side.
+[中文](./README.zh.md) · [GitHub](https://github.com/rorschachachxd/lark-opencode-bridge) · [npm](https://www.npmjs.com/package/lark-opencode-bridge)
 
-> 👋 **New here?** Read the [中文场景与定位指南 / Scenarios & positioning guide](./docs/SCENARIOS.zh.md) first — what it is, who it is and isn't for, the `/spawn` flagship, and typical workflows. The rest of this README is the technical reference.
+---
 
-```
-                    ┌──────────────────────────────┐
-  Feishu user msg → │ lark-cli event consume       │  (NDJSON stdout stream)
-                    │   im.message.receive_v1      │
-                    └──────────────┬───────────────┘
-                                   │ parsed events
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │ lark-opencode-bridge         │
-                    │  - per-chat session map      │
-                    │  - slash commands            │
-                    │  - allowlist / dedupe        │
-                    └──────────────┬───────────────┘
-                                   │ HTTP /session/.../prompt
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │ opencode serve (127.0.0.1)   │
-                    └──────────────┬───────────────┘
-                                   │ reply text
-                                   ▼
-                    ┌──────────────────────────────┐
-       reply to user│ lark-cli im +messages-reply  │
-                    └──────────────────────────────┘
-```
+## Contents
 
-## Status
+- [What it is](#what-it-is)
+- [What it is not](#what-it-is-not)
+- [Pain points it solves](#pain-points-it-solves)
+- [Flagship: `/spawn` workspace groups](#flagship-spawn-workspace-groups)
+- [Other capabilities](#other-capabilities)
+- [Typical use cases](#typical-use-cases)
+- [Prerequisites & fit](#prerequisites--fit)
+- [Getting started (step by step)](#getting-started-step-by-step)
+- [In-chat slash commands](#in-chat-slash-commands)
+- [Configuration](#configuration)
+- [Data directories](#data-directories)
+- [How it works](#how-it-works)
+- [Project layout](#project-layout)
+- [FAQ](#faq)
+- [License](#license)
 
-`v0.2` — P2P chats, group `@mentions`, **and Lark document comment
-`@mentions`**, with:
+---
 
-- **Streaming cards** (`replyStyle: "card"`) — opens an SSE connection to
-  opencode's `/event`, accumulates `message.part.updated` deltas (filtered to
-  assistant messages only), and PATCHes the Lark card every ~800ms.
-- **Attachments** — image/file/post messages have their resources fetched via
-  `lark-cli im +messages-mget` + `+messages-resources-download`, then handed
-  to opencode as `FilePartInput` (`file://` URLs into
-  `~/.lark-opencode-bridge/media/`).
-- **Named workspaces** — `/ws save|list|use|rm`, persisted to
-  `~/.lark-opencode-bridge/workspaces.json`.
-- **Doc comments** — when someone `@mentions` the bot in a comment or comment
-  reply on a Lark doc/docx/sheet/bitable/slides/file, the bridge picks it up
-  via the Lark
-  `drive.notice.comment_add_v1` event, prompts opencode with the comment
-  question (and the anchored excerpt if any), and posts a reply back into the
-  same comment thread.
-- **`/spawn <topic>` — one session per group** — from a P2P chat, the bridge
-  can create a dedicated Lark group (`[opencode] <topic>` prefix as the visual
-  "opencode tag") and bind it 1:1 to a brand-new opencode session. The group
-  description is set to a built-in cheat-sheet (`群内直接发消息无需 @；常用：
-  /help /new /status /stop /models /cd /undo`). Inside a spawned group **every
-  message goes to opencode without needing to `@mention` the bot** — the
-  bridge recognises spawned groups via a persisted set in `sessions.json`, so
-  this survives restarts. After the first response, the opencode-generated
-  session title is synced back into the group name.
+## What it is
 
-## Functional requirements
+You send a message in Feishu — the bridge forwards it to the `opencode` process running on your computer; opencode works inside the project directory you point it at (reads code, edits files, runs commands, drives LSP), and the process + result is streamed back as **a single auto-refreshing Lark card**.
 
-- P2P chat messages must create or reuse one opencode session per Lark chat and
-  reply in the original message thread.
-- Group messages must route to opencode when the bot is mentioned; groups
-  created with `/spawn` must route every message without requiring an
-  `@mention`.
-- Attachments in image/file/post messages must be downloaded locally and passed
-  to opencode as file parts.
-- Feishu/Lark cloud document comments must be supported: when a user
-  `@mentions` the bot in a document comment or comment reply, the bridge must
-  fetch the comment thread and anchored excerpt, ask opencode for an answer,
-  and post the answer back as a reply in the same comment thread.
-- Streaming card mode must show progress in-place and allow the user to stop a
-  running opencode request.
+No model in the cloud, no code hosting, no new account. Code and execution stay on your machine; Feishu only carries the messages and the card.
 
-Event ingestion is via the `@larksuiteoapi/node-sdk` WebSocket long-connection
-(lark-cli's `event consume` only covers IM messages). Outgoing actions still
-go through `lark-cli` (`im +messages-send/reply`, `api PATCH` for cards,
-`api POST` for comment replies).
+![Data flow: Feishu message → bridge → local opencode → streaming card](./docs/img/data-flow.svg)
 
-## Getting started (step-by-step)
+---
 
-> **First time?** Follow these steps in order. Run **`run` in the foreground** first to scan the QR code — do **not** jump straight to `start`.
+## What it is not
+
+The most common confusion. Here's the positioning, plainly:
+
+| Category | Examples | Difference |
+|---|---|---|
+| **General-purpose personal agent** | OpenClaw / Hermes | Generalist; not deep enough for serious coding work |
+| **Claude-Code-to-Feishu bridge** | Most similar projects bind to Claude Code | This one bridges to **opencode** — bring-your-own-model, no vendor lock-in |
+| **Plain terminal opencode** | opencode TUI | Can't go mobile, can't collaborate, gone when terminal closes. This brings it into Feishu's collab fabric. |
+
+> ✅ **One-line positioning:** A bridge that brings **a specialised coding agent (opencode)** into Feishu — not yet another general-purpose chatbot.
+
+---
+
+## Pain points it solves
+
+You're already using opencode, but it has natural limits:
+
+| Pain | Plain opencode | With this bridge |
+|---|---|---|
+| Tied to the desktop | Locked to your terminal | Drive it from any device that runs Feishu (phone, tablet, browser) |
+| Solo work | Context is locked inside your head | Pull others into a group around the same agent |
+| Sessions vanish | Close the terminal and context is gone | `/spawn` pins a session to a Lark group — come back any time |
+| Awkward to feed material | Manually paste paths / code | Drop files / screenshots; @mention the bot in doc comments |
+
+---
+
+## Flagship: `/spawn` workspace groups
+
+`/spawn` is the headline feature. It materialises *"one of your opencode sessions"* into a Feishu group: **one group = one session = one project context.**
+
+| 💾 Session persistence | 👥 Built-in collaboration | 🔁 P2P → P2A2P |
+|---|---|---|
+| Want to keep working on a project? Walk back into its group — context is still there, no re-briefing needed. | Pull product / engineering / QA into the same group. They share the agent's context. No `@` mention needed inside the group. | Upgrades collaboration from "brain → brain" to "person → agent → person", with the agent carrying context between people. |
+
+![P2P vs P2A2P collaboration model](./docs/img/spawn-collaboration.svg)
+
+> 📝 **Concrete example:** When a new feature is shipping, the PM briefs opencode inside a `/spawn` group — background, goals, constraints — and asks it to read the relevant code. Engineers join the same group and, instead of re-reading the PRD, simply ask the agent *"what's the context here / how far along are we / why is this designed this way?"*. The agent becomes the shared, always-on "context hub" between roles.
+
+---
+
+## Other capabilities
+
+- **QR onboarding** — first run shows a QR code; scan in Feishu to bind an app. No copying App Secret out of the dev console.
+- **Streaming card** — opencode's thinking, tool calls, and text all stream into a single Lark card; hit "Stop" any time.
+- **Doc-comment @mentions** — @mention the bot inside a Feishu doc / sheet comment; the agent reads the comment thread + the underlying code and **answers back into the comment thread**.
+- **Direct attachments** — drop screenshots or files at the bot; the agent reads the local file. Send an error screenshot or a log and let it dig in.
+- **Named workspaces** — `/workspaces` (alias `/ws`) switches across project directories; each one has its own isolated session.
+- **Manageable as a service** — supports a background daemon (start on login, auto-restart on crash) so the bot stays online.
+
+---
+
+## Typical use cases
+
+| Use case | Description |
+|---|---|
+| 📱 **On-the-go coding** | While commuting / travelling, use Feishu on your phone to drive opencode on your office machine — fix bugs, look up logic, add tests. |
+| 🤝 **Cross-role collaboration** | `/spawn` a project group; PM briefs requirements, engineering implements — both centred on the same agent. |
+| 📄 **Doc-driven development** | @mention the bot in a tech-design / API doc; let it answer comment threads grounded in the actual repository code. |
+| 🔍 **Ad-hoc debugging** | Drop an error screenshot or log file in chat; the agent reads it alongside the code and pinpoints the root cause. |
+
+---
+
+## Prerequisites & fit
+
+**Before you start, you need:**
+
+1. opencode installed locally with at least one model provider configured (Anthropic / OpenAI / Gemini / OpenRouter, etc.)
+2. Node.js ≥ 20
+3. A Feishu / Lark account (first-time QR wizard creates the app for you)
+
+| ✅ Good fit for | ❌ Not for |
+|---|---|
+| People doing real coding work who already use opencode (or want to) and want to extend it into Feishu and their team. | People who want a "talk-to-it-about-anything" general assistant (that's OpenClaw / Hermes territory) or who don't want opencode locally. |
+
+---
+
+## Getting started (step by step)
+
+> **First time?** Follow the steps in order. **Don't skip ahead.** The first run must happen in the foreground (`run`) to scan the QR code — **do not** jump straight to `start` (background daemon).
+
+![Four steps: install opencode → install bridge → scan QR → message in Feishu](./docs/img/quick-start.svg)
 
 ### Step 0 — Node.js
 
 Node.js **≥ 20** required:
 
 ```bash
-node -v
+node -v   # should print v20.x or higher
 ```
+
+No Node? Get LTS from [nodejs.org](https://nodejs.org/), or use Homebrew: `brew install node`.
 
 ### Step 1 — Install opencode
 
-The bridge spawns `opencode serve` locally. Install only — no separate login — but the `opencode` binary must be on `$PATH`.
+The bridge spawns `opencode serve` locally (no separate login), but the `opencode` binary must be on `$PATH`.
 
 ```bash
-# macOS / Linux (recommended)
+# Option A — official script (recommended on macOS / Linux)
 curl -fsSL https://opencode.ai/install | bash
 
-# or Homebrew
+# Option B — Homebrew
 brew install anomalyco/tap/opencode
 
-# or npm
+# Option C — npm
 npm install -g opencode-ai@latest
 ```
 
@@ -126,173 +160,217 @@ Verify in a **new terminal**:
 opencode --version
 ```
 
-Configure models/API keys per [opencode docs](https://opencode.ai/docs). Without a model, `/help` works but AI prompts may fail — use `/models` in chat to list providers.
+Configure models / API keys per [opencode docs](https://opencode.ai/docs). Without a model the bot can still respond to `/help`, but real AI prompts may fail — send `/models` in a P2P chat to list providers.
 
 ### Step 2 — Install Feishu CLI (lark-cli)
 
-Outgoing Lark actions use the official **`@larksuite/cli`** package (the unrelated npm package named `lark-cli` is **not** this tool):
+Outgoing Lark actions go through the official **`@larksuite/cli`** package (the unrelated npm package literally named `lark-cli` is **not** this tool):
 
 ```bash
 npm install -g @larksuite/cli@latest
 lark-cli --version
 ```
 
-The bridge can auto-install lark-cli on first `run`, but manual install avoids PATH surprises.
+> The bridge can auto-install lark-cli on first `run`, but installing manually first avoids PATH surprises.
 
-### Step 3 — Install lark-opencode-bridge
+### Step 3 — Install the bridge
 
 ```bash
 npm install -g lark-opencode-bridge@latest
+lark-opencode-bridge --version
 lark-opencode-bridge doctor
 ```
 
-Both `lark-cli` and `opencode` should show **ok**.
+Both `lark-cli` and `opencode` should report **ok**.
 
 ### Step 4 — First foreground run + QR setup
 
 ```bash
 lark-opencode-bridge run
+# equivalent to:
+lark-opencode-bridge
 ```
 
-Scan with the Feishu app → create/select an app → credentials land in `~/.lark-cli/config.json` and `~/.lark-opencode-bridge/secrets.json`. Wait for **`bridge ready — listening for IM messages`** before testing.
+You'll see a QR code in the terminal (macOS also tries to open a browser):
+
+1. Scan with the **Feishu app**
+2. Pick or create an app (PersonalAgent flow)
+3. Credentials land in `~/.lark-cli/config.json`; the app secret is written to `~/.lark-opencode-bridge/secrets.json`
+4. The terminal prompts you to open **Permissions** in the dev console and copies the recommended permission JSON
+
+When you see **`bridge ready — listening for IM messages`** in the log, the bridge is up. **Leave this terminal window open** for easier debugging.
 
 ### Step 5 — Feishu developer console (required)
 
-In https://open.feishu.cn/app/<app_id>:
+In [open.feishu.cn](https://open.feishu.cn/), open the app the wizard created:
 
-1. Enable **Bot** capability
-2. **Permissions** — import JSON from `lark-opencode-bridge scopes --copy`
-3. **Events** — use **persistent connection** (not webhook); subscribe to `im.message.receive_v1`
-4. **Publish a version** (most commonly missed step)
+| Task | Notes |
+|---|---|
+| **App capabilities → Bot** | Enable the bot |
+| **Permissions** | The wizard copies a JSON. You can also run `lark-opencode-bridge scopes --copy` locally and "batch import" in the console |
+| **Event subscriptions** | Choose **"Persistent connection"** (NOT webhook) |
+| **Versions** | Create a new version and **publish it** (self-built apps also need admin approval) |
 
-Optional: `lark-opencode-bridge configure` to auto-set events and card callbacks.
+Local helper to auto-configure events + card callbacks:
+
+```bash
+lark-opencode-bridge configure
+```
+
+> **The most commonly missed step:** adding permissions but **not publishing** a version. The bot will appear online but receive no messages.
 
 ### Step 6 — Verify in Feishu
 
-1. Open a **P2P** chat with your bot
-2. Send `/help` — should reply immediately
-3. In normal groups, **`@mention` the bot**; or use `/spawn <topic>` for a dedicated workspace group
+1. Open the bot in Feishu and **start with a P2P chat**
+2. Send `/help`
+   - Reply? You're good
+   - No reply? See the troubleshooting table below, or check `~/.lark-opencode-bridge/logs/`
+3. In **normal groups** you must `@bot`. Use `/spawn <topic>` to create a dedicated workspace group where the @ is no longer needed.
 
-### Step 7 — Background daemon (optional)
+### Step 7 (optional) — Background daemon
 
-Only after Step 6 works (macOS / Linux):
+Only **after Step 6 works**, switch to the background (macOS / Linux only):
 
 ```bash
+# Stop the foreground run with Ctrl+C first
 lark-opencode-bridge start
 lark-opencode-bridge status
 ```
 
-Requires **global** install (`npm i -g`), not `npx`.
+Logs: `~/.lark-opencode-bridge/logs/`.
 
-See also [README.zh.md](./README.zh.md) for the Chinese walkthrough.
+> Daemon mode requires a **global** install (`npm i -g`). Don't use `npx`.
 
-## Prerequisites
+### Troubleshooting
 
-- Node.js ≥ 20
-- [`opencode`](https://opencode.ai) on `$PATH`
-- Feishu CLI: [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli)
-- A Feishu/Lark app (created via QR wizard on first `run`)
-
-### Quick start (already set up)
-
-```bash
-npm i -g lark-opencode-bridge@latest
-lark-opencode-bridge run
-```
-
-### Manual / advanced setup
-
-If you prefer not to use the wizard:
-
-```bash
-npx @larksuite/cli@latest install
-# 或
-npm install -g @larksuite/cli@latest
-```
-
-### Lark developer console settings (one-time)
-
-For each Lark app the bridge talks to, in https://open.feishu.cn/app/<app_id>:
-
-1. **应用能力 → 机器人** — enable bot capability.
-2. **权限管理** — request and enable:
-   - `im:message.p2p_msg:readonly` (receive P2P messages)
-   - `im:message:send_as_bot` (send messages as bot)
-   - `im:chat` (create / update groups — required for `/spawn`)
-   - `im:message.group_at_msg:readonly` (receive **@-bot** group messages — minimum for normal group use)
-   - **`im:message.group_msg`** — **sensitive permission**, "获取群组中所有消息". Required for `/spawn`'s "no @ needed" behaviour: without it Lark simply doesn't deliver non-mention messages to the bot, no matter what the bridge does. Note the name has **no `:readonly` suffix** — that historical/typo'd form (`im:message.group_msg:readonly`) doesn't exist in the current Lark console. Sensitive permissions require **tenant admin approval** in addition to publishing a new app version.
-   - `drive:file:read` *and* `drive:file.comment:create` for comment support.
-3. **事件订阅 → 订阅方式** — must be **长连接 (persistent connection)**, not
-   webhook. Then subscribe to:
-   - `接收消息 v2.0` (`im.message.receive_v1`)
-   - `文档新增评论` (`drive.notice.comment_add_v1`) — only if you want
-     comment support.
-4. **版本管理与发布** — publish a version (this is the most commonly missed
-   step). Self-built apps additionally need admin approval.
-
-## Build & run
-
-```bash
-npm install
-npm run build
-
-# first time: auto QR wizard if no app configured
-npm start
-# or
-node ./bin/lark-opencode-bridge.mjs run --cwd /path/to/your/repo
-
-node ./bin/lark-opencode-bridge.mjs doctor
-```
-
-Logs go to stdout/stderr. State is persisted under
-`~/.lark-opencode-bridge/` (override with `LARK_OPENCODE_HOME`).
-
-## In-chat commands
-
-The bridge mirrors opencode's TUI command names where possible (see
-[`opencode TUI docs`](https://opencode.ai/docs/tui/)). Older bridge-style
-singular forms (`/model`, `/agent`, `/ws`) and opencode's own aliases
-(`/clear`, `/summarize`, `/resume`, `/continue`) all map to the canonical
-command below.
-
-Opencode-aligned:
-
-| Command | Aliases | Effect |
+| Symptom | Likely cause | Fix |
 |---|---|---|
-| `/help` | — | List commands |
-| `/new` | `/clear` | Reset the opencode session for this chat |
-| `/init` | — | Analyse the project and create/refresh `AGENTS.md` |
-| `/sessions` | `/resume`, `/continue` | List opencode sessions |
-| `/models` | `/model` | List providers + models opencode has available |
-| `/models <provider/model>` | `/model <provider/model>` | Switch model for this chat (auto-completes the provider prefix when unambiguous) |
-| `/agents` | `/agent` | List available agents |
-| `/agents <name>` | `/agent <name>` | Switch agent (`build` / `plan` / …) for this chat |
-| `/compact` | `/summarize` | Compact the current session (opencode `summarize`) |
-| `/share` | — | Create a public share link for this session |
+| P2P `/help` no reply | App version not published / events not on persistent connection | Redo Step 5 |
+| No reply in groups | Bot wasn't `@`-mentioned | `@bot` in group, or use `/spawn` |
+| Still no reply after `start` | QR not scanned, or opencode not on PATH | Run `run` to scan first; `doctor` to diagnose |
+| AI doesn't respond but `/help` works | opencode has no model configured | Set up an API key; `/models` in P2P |
+| `doctor` reports opencode / lark-cli MISSING | Not installed or not on PATH | Redo Steps 1 / 2, then **open a new terminal** |
+
+---
+
+## In-chat slash commands
+
+In any Feishu chat, send a **single line starting with `/`** (or end a multi-line message with the command on the last line). Slash commands are handled **locally by the bridge** — they don't go through opencode and respond instantly.
+
+**How to send messages**
+
+| Context | Usage |
+|---|---|
+| P2P chat with the bot | Send text directly; `/help` for everything |
+| Normal group | `@bot` first (or `@bot` followed by a command) |
+| `/spawn` workspace group | **No `@` needed** — talk to the bot directly |
+| Images / files / rich text | Send normally; the bridge downloads attachments and feeds them to opencode |
+| Doc comments | `@bot` inside a comment; the answer is posted back into the comment thread |
+
+**Aliases** (case-insensitive):
+
+- `/clear` → `/new`
+- `/summarize` → `/compact`
+- `/resume`, `/continue` → `/sessions`
+- `/model` → `/models`, `/agent` → `/agents`, `/ws` → `/workspaces`
+- `/group`, `/拉群` → `/spawn`
+
+**Admin-only** (🔒): once you set `adminOpenIds` via `/config`, the marked commands are restricted to admins.
+
+### Session & task
+
+| Command | Aliases | Description |
+|---|---|---|
+| `/help` | — | Show the full help (same content as this README) |
+| `/new` | `/clear` | Reset **this chat's** opencode session, clearing context |
+| `/init` | — | Have opencode analyse the cwd and create / update root `AGENTS.md` |
+| `/sessions` | `/resume`, `/continue` | List opencode's existing sessions (debug) |
+| `/compact` | `/summarize` | Compact the current session's history, preserving key points |
+| `/share` | — | Create a public share link for the current session |
 | `/unshare` | — | Revoke the share link |
 | `/undo` | — | Revert the last user message and its file changes |
-| `/redo` | — | Restore the previously reverted messages |
+| `/redo` | — | Restore content reverted by `/undo` |
+| `/stop` | — | **Abort** the in-flight prompt (equivalent to ESC) |
 
-Bridge-specific (no opencode TUI counterpart):
+### Model & agent
 
-| Command | Aliases | Effect |
+| Command | Aliases | Description |
 |---|---|---|
-| `/cd <path>` | — | Set the working directory for this chat |
-| `/status` | — | Show current session id, cwd, agent, model |
-| `/stop` | — | Abort the in-flight prompt |
-| `/spawn <topic>` | `/group`, `/拉群` | **P2P only.** Create a new Lark group named `[opencode] <topic>` with a cheat-sheet in its description, invite you and the bot, bind a fresh opencode session. Inside the spawned group **every message is auto-routed to opencode (no `@mention` needed)**; the opencode-generated session title syncs back into the group name after the first response. |
-| `/workspaces list` | `/ws list` | List saved workspaces |
-| `/workspaces save <name> [path]` | `/ws save …` | Save the chat's current cwd (or an explicit path) as a workspace |
-| `/workspaces use <name>` | `/ws use …` | Switch this chat to a saved workspace (resets the session) |
-| `/workspaces rm <name>` | `/ws rm …` | Delete a workspace |
-| `/reconnect` | — | Manually reconnect the Feishu WebSocket (when messages stop arriving) |
-| `/timeout [minutes]` | — | View or set per-chat idle timeout (auto-abort when opencode is silent); `0` disables |
-| `/doctor [note]` | — | Ask opencode to diagnose recent bridge warn/error logs (optional user description) |
-| `/config` | — | Open the interactive preferences card (reply style, allowlists, group @ policy, etc.) |
+| `/models` | `/model` | List opencode's available providers and models |
+| `/models <provider/model>` | `/model …` | Switch the model for **this chat**; the provider prefix auto-completes when unambiguous |
+| `/agents` | `/agent` | List available agents (e.g. `build`, `plan`) |
+| `/agents <name>` | `/agent …` | Switch the agent for **this chat** |
 
-Commands marked 🔒 in [README.zh.md](./README.zh.md#飞书内斜杠命令) (`/config`, `/reconnect`, `/doctor`, `/cd`, `/workspaces`, `/spawn`) require admin when `adminOpenIds` is set in config.
+### Directory, status, workspace groups
 
-## Config
+| Command | Aliases | Description |
+|---|---|---|
+| `/cd <absolute-path>` | — | Set **this chat's** working directory (rebuilds the session) 🔒 |
+| `/status` | — | Show session id, cwd, agent, model, WebSocket state, idle timeout |
+| `/spawn <topic>` | `/group`, `/拉群` | **P2P only.** Create a group named `[opencode] <topic>`, invite you, bind a fresh session; **no `@` needed inside** 🔒 |
+| `/workspaces list` | `/ws list` | List named workspaces 🔒 |
+| `/workspaces save <name> [path]` | `/ws save …` | Save a workspace (defaults to current cwd) 🔒 |
+| `/workspaces use <name>` | `/ws use …` | Switch to a saved workspace (rebuilds the session) 🔒 |
+| `/workspaces rm <name>` | `/ws rm …` | Delete a workspace 🔒 |
+
+### Ops & preferences
+
+| Command | Aliases | Description |
+|---|---|---|
+| `/reconnect` | — | Manually reconnect the Feishu WebSocket (when messages stop arriving) 🔒 |
+| `/timeout [minutes]` | — | No args: show per-chat / global idle timeout. `/timeout 30` aborts when opencode is silent for 30 min. `/timeout 0` disables. |
+| `/doctor [note]` | — | Hand recent bridge logs to opencode for **self-diagnosis** (optional description) 🔒 |
+| `/config` | — | Open the interactive **preferences card** (reply style, allowlists, group-`@` policy, doc comments, ...) 🔒 |
+
+`/config` can change:
+
+- **reply / card** — plain markdown reply vs streaming interactive card
+- **idle timeout & message-batching window**
+- **whether to process doc comments**, **whether groups need `@`**
+- **allowed user / chat IDs**, **admin IDs**
+
+Submitted changes write `~/.lark-opencode-bridge/config.json` immediately; **no restart needed**.
+
+**Examples**
+
+```text
+/help
+/status
+/models anthropic/claude-sonnet-4
+/agents build
+/cd /Users/me/my-project
+/spawn refactor login module
+/workspaces save main /Users/me/my-project
+/workspaces use main
+/timeout 45
+/doctor P2P works but no reply when @-mentioned in groups
+```
+
+**Anything else (plain text, images, files) is forwarded to opencode** as a normal prompt; conversations are isolated per `chat_id`.
+
+### Host CLI
+
+```
+lark-opencode-bridge              Foreground (default = run)
+lark-opencode-bridge run          Run the bot in the foreground
+lark-opencode-bridge start        Install + start the background daemon (macOS / Linux)
+lark-opencode-bridge stop         Stop the daemon
+lark-opencode-bridge restart      Restart the daemon
+lark-opencode-bridge unregister   Remove the service registration
+lark-opencode-bridge setup        QR wizard only (don't start the bridge)
+lark-opencode-bridge configure    Auto-configure app name, persistent events, card callbacks
+lark-opencode-bridge scopes       Print the recommended permission JSON
+lark-opencode-bridge doctor       Self-check dependencies and configuration
+lark-opencode-bridge ps           List bridge processes on this machine
+lark-opencode-bridge status       Show daemon + config summary
+lark-opencode-bridge service install|start|stop|uninstall  (equivalent to start/stop)
+```
+
+> Daemon is **macOS / Linux only**. `start` etc. require a **global install** (`npm i -g`) — not `npx`.
+
+---
+
+## Configuration
 
 `~/.lark-opencode-bridge/config.json`:
 
@@ -304,148 +382,170 @@ Commands marked 🔒 in [README.zh.md](./README.zh.md#飞书内斜杠命令) (`/
   "larkIdentity": "bot",
   "allowedSenderOpenIds": [],
   "allowedChatIds": [],
-  "replyStyle": "reply",
+  "replyStyle": "card",
   "handleDocComments": true,
   "defaultCwd": "/Users/me/repo",
   "agent": "build",
-  "model": "anthropic/claude-3-5-sonnet"
+  "model": "anthropic/claude-sonnet-4"
 }
 ```
 
-The `model` string is split on the first `/` into `{providerID, modelID}` (the
-shape opencode expects). `defaultCwd` becomes the `directory` parameter when
-the bridge creates a session for a chat. Changing cwd via `/cd` resets the
-chat's session because opencode binds `directory` at session creation.
+- `model` is split on the first `/` into `{providerID, modelID}` (what opencode expects).
+- `defaultCwd` becomes the `directory` parameter when the bridge creates a session for a chat. Changing cwd via `/cd` rebuilds the session because opencode binds `directory` at session creation.
+- `allowedSenderOpenIds` / `allowedChatIds` — empty array = unrestricted. Add `ou_…` / `oc_…` IDs to restrict.
+- `replyStyle` — `"card"` (default, streaming interactive card) or `"reply"` (plain markdown reply).
+- `handleDocComments` — `true` enables Feishu doc-comment `@`-mention handling.
+- `manageOpencodeServer` — set to `false` to point at an externally running `opencode serve`.
 
-- `allowedSenderOpenIds` — empty array = anyone may talk to the bot. Add
-  `ou_…` ids to restrict.
-- `allowedChatIds` — same idea for `oc_…` chats.
-- `replyStyle` — `"reply"` (threaded markdown) or `"card"` (interactive card).
-- `handleDocComments` — `true` enables Feishu/Lark document comment
-  `@mention` handling and posts opencode's answer back into the same comment
-  thread.
-- `manageOpencodeServer` — if `false`, point the bridge at an externally
-  running `opencode serve`.
+Friendlier: send `/config` in Feishu for an interactive settings card.
 
-## How it works
-
-1. `bridge run` starts `opencode serve` as a child process (skip with
-   `--no-manage-server`) and waits for it to listen on
-   `http://127.0.0.1:4096`.
-2. It then spawns `lark-cli event consume im.message.receive_v1 --as bot
-   --quiet` and reads NDJSON from stdout.
-3. Each parsed event is deduped by `event_id`, filtered against the
-   allowlist, and (for group chats) requires an `@_user_` mention marker in
-   the message content.
-4. Slash commands (see table above) short-circuit; everything else becomes an
-   opencode prompt:
-   - Lazy-create one opencode session per `chat_id` (persisted to disk).
-   - `POST /session/{id}/prompt` with `parts: [{type:"text", text}]`,
-     optionally setting `agent`, `model`, `cwd`.
-   - Concatenate `text`-typed parts from the response.
-5. Reply via `lark-cli im +messages-reply --message-id <om_…> --markdown
-   …`.
-
-## Layout
-
-```
-src/
-├── cli.ts                # commander entry (`run`, `doctor`, `config`)
-├── config.ts             # ~/.lark-opencode-bridge/config.json schema
-├── session.ts            # chat_id → opencode session_id store
-├── workspace.ts          # named workspace store (/ws)
-├── slash.ts              # in-chat slash-command parser
-├── paths.ts              # filesystem paths
-├── log.ts                # tiny scoped logger
-├── core/bridge.ts        # orchestrator (slash, prompt, streaming, attach,
-│                           comment handler)
-├── lark/
-│   ├── ws-consumer.ts    # @larksuiteoapi/node-sdk WSClient (IM + comments)
-│   ├── sender.ts         # `+messages-send`, `+messages-reply`, card PATCH
-│   ├── attach.ts         # mget + resources-download for image/file/post
-│   ├── comments.ts       # fetch comment thread + post comment reply
-│   ├── credentials.ts    # resolve app_id (lark-cli config) + app_secret
-│   │                       (env / keychain)
-│   └── types.ts          # event schema (message + comment)
-├── opencode/
-│   ├── server.ts         # spawns `opencode serve`, waits for ready
-│   ├── client.ts         # HTTP client (`POST /session/:id/message`)
-│   └── events.ts         # SSE client for `/event`, role-aware normalization
-└── card/
-    ├── state.ts          # streaming CardState (text/reasoning/tool/status)
-    └── render.ts         # static card builder (unused by default; kept for
-                          # explicit one-shot card sends)
-```
-
-## Reply modes
+### Reply modes
 
 `config.replyStyle`:
 
-- **`reply`** (default) — bridge waits for the prompt to complete and posts a
-  single threaded markdown reply.
-- **`card`** — bridge immediately sends an interactive card showing
-  "thinking…", subscribes to opencode's SSE event stream, and PATCHes the
-  card every ~800ms with the latest accumulated text. Only parts that belong
-  to messages with `role: assistant` are rendered, so the user's own message
-  is never echoed.
+- **`card`** (default) — bridge immediately sends a "thinking…" card, subscribes to opencode's SSE event stream, and PATCHes the card every ~800 ms with the latest text. Only parts of messages with `role: assistant` are rendered, so the user's own message is never echoed back.
+- **`reply`** — bridge waits for the prompt to complete, then posts a single threaded markdown reply.
 
-## Doc comment flow
+---
+
+## Data directories
+
+| Path | Content |
+|---|---|
+| `~/.lark-opencode-bridge/config.json` | Bridge configuration (port, cwd, replyStyle, ...) |
+| `~/.lark-opencode-bridge/secrets.json` | App secret (written by setup; mode 600) |
+| `~/.lark-opencode-bridge/sessions.json` | chat → opencode session map + spawned-group set |
+| `~/.lark-opencode-bridge/workspaces.json` | Named workspaces |
+| `~/.lark-opencode-bridge/media/` | Downloaded attachments (auto-pruned after 24h) |
+| `~/.lark-opencode-bridge/logs/` | JSONL logs, rotated daily, kept 7 days by default |
+| `~/.lark-opencode-bridge/processes.json` | Local bridge process registry |
+
+`~/.lark-cli/config.json` is maintained by lark-cli / the QR wizard (app id, profile, ...).
+
+Env vars:
+
+- `LARK_OPENCODE_HOME` — override the default data directory
+- `LARK_OPENCODE_LOG_DAYS` — log retention in days (default 7)
+
+---
+
+## How it works
+
+1. `bridge run` starts `opencode serve` as a child process (unless `manageOpencodeServer=false`) and waits for `http://127.0.0.1:4096` to listen.
+2. Establishes a persistent Feishu WebSocket via `@larksuiteoapi/node-sdk` and subscribes to `im.message.receive_v1` + `drive.notice.comment_add_v1` + card-action callbacks.
+3. Each event is deduped by `event_id`, filtered against the allowlist, and (for normal groups) verified to contain an `@bot` mention — `/spawn` groups bypass this check.
+4. Text whose first line starts with `/` → handled locally by the bridge. Otherwise:
+   - Lazily create one opencode session per `chat_id` (persisted to disk).
+   - `POST /session/{id}/prompt_async` and subscribe to the SSE event stream.
+   - Card mode: render SSE deltas into a Lark card, PATCH every ~800 ms.
+   - Reply mode: wait until the session goes idle, then post one markdown reply.
+5. **Batch + preempt**: rapid messages in the same chat are coalesced into one prompt; a new message mid-run cancels the previous run.
+
+### Doc comment flow
 
 ```
-飞书文档评论/回复 @机器人 ───► drive.notice.comment_add_v1 (WSClient)
-                          │ is_mentioned: true
-                          ▼
-                       fetchThread()  (GET /open-apis/drive/v1/files/.../comments/...)
-                          │ extract triggering reply text + anchored quote
-                          ▼
-                       opencode session keyed by `doc:<file_token>`
-                          │ session.prompt with question + quote + doc URL
-                          ▼
-                       postReply()  (POST .../comments/{commentId}/replies)
+Feishu doc comment / reply @bot ───► drive.notice.comment_add_v1 (WSClient)
+                                  │ is_mentioned: true
+                                  ▼
+                               fetchThread() (GET /open-apis/drive/v1/files/.../comments/...)
+                                  │ extract triggering reply text + anchored quote
+                                  ▼
+                               opencode session keyed by `doc:<file_token>`
+                                  │ session.prompt with question + quote + doc URL
+                                  ▼
+                               postReply() (POST .../comments/{commentId}/replies)
 ```
 
-- Each document gets its own opencode session (keyed by `file_token`),
-  so a thread of follow-up comments retains context.
-- Replies are plain text capped at 2000 chars (Lark comment limit).
-- Set `config.handleDocComments = false` to disable this branch (e.g. when
-  the app isn't subscribed to the event yet).
+- Each doc keeps its own opencode session (keyed by `file_token`), so a follow-up comment thread retains context.
+- Replies are plain text, capped at 2000 characters (Lark comment limit).
 
-## Attachments
+### Attachment flow
 
-When a Lark message of type `image`, `file`, or `post` arrives:
+When an `image` / `file` / `post` message arrives:
 
-1. `lark-cli im +messages-mget --message-ids <om_…>` fetches the structured
-   message (event payload `content` is pre-rendered text and doesn't expose
-   `image_key` / `file_key`).
-2. For each `image_key` / `file_key` found, `lark-cli im
-   +messages-resources-download --type image|file --output <relative>`
-   downloads the resource into `~/.lark-opencode-bridge/media/<message_id>/`.
-3. The local file is handed to opencode as a `FilePartInput` with a
-   `file://` URL and a best-effort `mime` derived from the extension.
+1. `lark-cli im +messages-mget` fetches the structured message (the event payload's `content` is pre-rendered text and lacks `image_key` / `file_key`).
+2. For each `image_key` / `file_key`, `+messages-resources-download` downloads it to `~/.lark-opencode-bridge/media/<message_id>/`.
+3. The local file is handed to opencode as a `FilePartInput` (`file://` URL + best-effort `mime` from the extension).
 
-`post` messages are walked recursively for `tag: img` and `tag: file` nodes.
+`post` messages are recursively walked for `tag: img` / `tag: file` nodes.
 
-## Background service
+---
 
-macOS (launchd) and Linux (systemd user unit) — **not supported on Windows** (use foreground `run`):
+## Project layout
 
-```bash
-npm i -g lark-opencode-bridge   # required for stable daemon paths
-lark-opencode-bridge start      # install + start
-lark-opencode-bridge stop
-lark-opencode-bridge restart
-lark-opencode-bridge unregister
-lark-opencode-bridge status
+```
+src/
+├── cli.ts                # commander entry (run/start/stop/doctor/config/...)
+├── config.ts             # config.json schema
+├── session.ts            # chat_id → opencode session_id + cwd + spawned set
+├── workspace.ts          # named workspace store
+├── slash.ts              # slash-command parser
+├── paths.ts              # filesystem paths
+├── log.ts                # JSONL logging + daily rotation + recentLogEntries
+├── preflight.ts          # startup dependency check
+│
+├── core/
+│   ├── bridge.ts         # main orchestrator (routing, prompt, card, comments, /spawn)
+│   ├── pending-queue.ts  # message coalescing + preempt queue
+│   └── idle-watchdog.ts  # idle-timeout watchdog
+│
+├── card/
+│   ├── run-state.ts      # RunState state machine
+│   ├── run-renderer.ts   # streaming card renderer (schema 2.0)
+│   ├── agent-event.ts    # opencode SSE → AgentEvent adapter
+│   └── tool-render.ts    # tool block markdown
+│
+├── lark/
+│   ├── ws-consumer.ts    # LarkChannel WebSocket entry
+│   ├── sender.ts         # send / patch card
+│   ├── chats.ts          # group create / rename (/spawn)
+│   ├── attach.ts         # attachment downloader
+│   ├── comments.ts       # comment thread fetch + reply
+│   ├── credentials.ts    # credentials resolver
+│   ├── wizard.ts         # QR onboarding wizard
+│   ├── keepalive.ts      # WS health-check + auto-reconnect
+│   └── ...               # scopes / app-setup / install helpers
+│
+├── opencode/
+│   ├── server.ts         # spawn / supervise opencode serve
+│   ├── client.ts         # HTTP client
+│   └── events.ts         # SSE event normalisation
+│
+├── process/
+│   ├── registry.ts       # atomic read/write of processes.json
+│   └── conflicts.ts      # multi-instance detection for the same app
+│
+├── service/
+│   └── daemon.ts         # launchd (macOS) / systemd (Linux)
+│
+└── media/
+    └── cleanup.ts        # periodic media cleanup (24h)
 ```
 
-In-chat preferences: send `/config` for an interactive settings card (reply style, access control, group @ policy, etc.).
+---
 
-## Known limitations
+## FAQ
 
-- **Windows**: no background daemon; use `lark-opencode-bridge run`.
-- **Group @ detection**: relies on `@_user_` markers in rendered content until explicit `mentions[]` is available from lark-cli.
-- **Permission prompts**: card mode auto-approves opencode tool permissions for non-interactive Lark runs.
+**Q: How is this different from OpenClaw / Hermes?**
+Those are general-purpose agents that do a bit of everything. This is specifically a bridge for a **specialised coding agent** (opencode). Use the specialist for real coding work.
+
+**Q: Can I use it without opencode?**
+No. This is the *bridge*, not the agent. It drives opencode running on your machine.
+
+**Q: Does it upload my code?**
+No. Code and execution stay local; Feishu only sees the message text and the rendered card.
+
+**Q: Why opencode and not Claude Code?**
+opencode is open source, terminal-native, and **model-agnostic** — you pick the model per task, control cost, and aren't locked to one vendor. If you already use opencode, this bridge lets it live inside Feishu.
+
+**Q: The bot doesn't reply in groups?**
+Normal groups require `@bot`. Use `/spawn <topic>` to create a dedicated workspace group where `@` is not needed.
+
+**Q: Does it work on Windows?**
+Foreground `run` works; the background daemon is macOS / Linux only.
+
+---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+[MIT](./LICENSE)
